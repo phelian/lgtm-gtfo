@@ -35,6 +35,25 @@ deno task gtfo              # actually move to trash
 deno task lgtm --folder dependabot     # only scan specific subfolder
 deno task lgtm --skip-mentions         # delete even if @mentioned
 deno task lgtm --skip-review-requests  # delete even if requested reviewer
+deno task lgtm --ci-days 3             # also delete CI emails older than 3 days
+```
+
+### Pending reviews
+
+```bash
+deno task lgtm --pending               # list PRs awaiting your review
+deno task lgtm --pending --no-bot      # exclude dependabot/es-robot PRs
+```
+
+### Shell completions
+
+Source `.zsh_completions` for aliases with tab completion:
+
+```bash
+source .zsh_completions
+lgtm --<tab>                           # deno task lgtm with completions
+gtfo --<tab>                           # deno task gtfo with completions
+pending --<tab>                        # deno task lgtm --pending
 ```
 
 ## Backends
