@@ -1,0 +1,27 @@
+_lgtm_gtfo() {
+  _arguments \
+    '--confirm[actually delete emails]' \
+    '--folder=[scan specific subfolder]:folder' \
+    '--skip-mentions[delete even if @mentioned]' \
+    '--skip-review-requests[delete even if requested reviewer]' \
+    '--ci-days=[delete CI emails older than N days]:days' \
+    '--pending[list PRs waiting for review]' \
+    '--no-bot[exclude bot PRs from --pending]' \
+    '--graph[use Microsoft Graph API]' \
+    '--ews[use Exchange Web Services]' \
+    '--help[show help]'
+}
+
+lgtm() {
+  deno task lgtm "$@"
+}
+
+gtfo() {
+  deno task gtfo "$@"
+}
+
+pending() {
+  deno task lgtm --pending "$@"
+}
+
+compdef _lgtm_gtfo lgtm gtfo pending
