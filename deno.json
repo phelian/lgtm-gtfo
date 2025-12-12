@@ -1,0 +1,23 @@
+{
+  "imports": {
+    "@std/cli": "jsr:@std/cli@^1.0.0",
+    "@std/fs": "jsr:@std/fs@^1.0.0",
+    "@std/path": "jsr:@std/path@^1.0.0",
+    "deno-dom": "https://deno.land/x/deno_dom@v0.1.48/deno-dom-wasm.ts"
+  },
+  "tasks": {
+    "lgtm": "deno run --env=.env.local --allow-net --allow-read --allow-write --allow-run --allow-env main.ts",
+    "gtfo": "deno run --env=.env.local --allow-net --allow-read --allow-write --allow-run --allow-env main.ts --confirm",
+    "run": "deno task lgtm",
+    "clean": "deno task gtfo"
+  },
+  "fmt": {
+    "semiColons": true,
+    "exclude": [".direnv/", ".git/"]
+  },
+  "lint": {
+    "rules": {
+      "include": ["no-explicit-any", "no-unused-vars", "prefer-const"]
+    }
+  }
+}
