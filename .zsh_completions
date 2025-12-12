@@ -24,4 +24,8 @@ pending() {
   deno task lgtm --pending "$@"
 }
 
-compdef _lgtm_gtfo lgtm gtfo pending
+todo() {
+  deno task lgtm --pending --no-bot "$@"
+}
+
+compdef _lgtm_gtfo lgtm gtfo pending todo

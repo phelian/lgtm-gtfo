@@ -40,6 +40,13 @@ deno task lgtm --ci-days 3             # also delete CI emails older than 3 days
 
 ### Pending reviews
 
+List PRs awaiting your review, grouped by status:
+
+- **Needs 1 more approval** - your review would unblock the PR
+- **Needs more approvals** - still needs multiple reviews
+- **Changes requested** - someone requested changes
+- **Approved** - approved but not yet merged
+
 ```bash
 deno task lgtm --pending               # list PRs awaiting your review
 deno task lgtm --pending --no-bot      # exclude dependabot/es-robot PRs
@@ -51,9 +58,10 @@ Source `.zsh_completions` for aliases with tab completion:
 
 ```bash
 source .zsh_completions
-lgtm --<tab>                           # deno task lgtm with completions
-gtfo --<tab>                           # deno task gtfo with completions
-pending --<tab>                        # deno task lgtm --pending
+lgtm                                   # dry run
+gtfo                                   # actually delete
+pending                                # list all PRs awaiting review
+todo                                   # list PRs awaiting review (no bots)
 ```
 
 ## Backends
