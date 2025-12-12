@@ -16,6 +16,7 @@ deno task lgtm              # dry run - see what would be deleted
 deno task gtfo              # actually move to trash (--confirm)
 deno fmt                    # format code
 deno lint                   # lint code
+deno check src/**/*.ts      # type check
 ```
 
 ### CLI options
@@ -23,6 +24,9 @@ deno lint                   # lint code
 - `--folder <name>` - only scan specific github subfolder
 - `--skip-mentions` - delete even if @mentioned
 - `--skip-review-requests` - delete even if requested reviewer
+- `--ci-days <n>` - delete CI/workflow emails older than n days
+- `--pending` - list PRs awaiting your review
+- `--no-bot` - exclude bot PRs (dependabot, es-robot) from pending
 - `--graph` / `--ews` - override backend
 
 ## Architecture
@@ -30,20 +34,44 @@ deno lint                   # lint code
 CLI tool that cleans GitHub notification emails for closed/merged PRs where you
 weren't involved.
 
-**Flow:** `main.ts` → `src/cli.ts` (arg parsing) → `src/processor.ts`
-(orchestration) → backends + github checks
+```
+main.ts → src/cli.ts → src/processor.ts → backends + github checks
+```
 
-**Backends** (`src/*/emails.ts`):
+### Source structure
 
-- `ms-graph/` - Microsoft Graph API with OAuth
-- `ews/` - Exchange Web Services with OAuth
-- `mail-app/` - macOS Mail.app via AppleScript (workaround for strict org
-  policies)
+```
+src/
+├── cli.ts              # argument parsing, help text
+├── processor.ts        # orchestration, deletion logic
+├── github/
+│   └── pr.ts           # PR status checks, pending reviews (gh CLI)
+├── shared/
+│   ├── types.ts        # unified email types
+│   ├── parse-subject.ts # extract repo/PR from subject
+│   └── oauth.ts        # PKCE oauth flow, token storage
+├── ms-graph/
+│   ├── auth.ts         # Graph API oauth config
+│   └── emails.ts       # fetch/delete via Graph API
+├── ews/
+│   ├── auth.ts         # EWS oauth config
+│   └── emails.ts       # fetch/delete via EWS SOAP
+└── mail-app/
+    └── emails.ts       # fetch/delete via AppleScript
+```
 
-Each backend exports `fetchGitHubEmails()` and `batchMoveToTrash()`.
+### Backend interface
 
-**GitHub checks** (`src/github/pr.ts`): Uses `gh` CLI to check PR status,
-mentions, and review requests.
+Each backend (`ms-graph`, `ews`, `mail-app`) exports:
+
+- `fetchGitHubEmails(folder?)` - returns `UnifiedEmail[]`
+- `batchMoveToTrash(ids)` - moves emails to trash
+
+### Key types
+
+- `UnifiedEmail` - common email type across backends
+- `PrCheckResult` - PR status with mentions/reviewer info
+- `Backend` - `"graph" | "ews" | "mail-app"`
 
 ## Environment
 
@@ -51,3 +79,10 @@ mentions, and review requests.
 GITHUB_HANDLE    # your github username (or detected via gh api)
 LGTM_BACKEND     # graph (default), ews, or mail-app
 ```
+
+## Shell aliases
+
+Source `.zsh_completions` for:
+
+- `lgtm` / `gtfo` / `pending` / `todo` aliases
+- tab completion for all flags
