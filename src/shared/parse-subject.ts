@@ -7,6 +7,7 @@ const patterns = [
   /\[(.+?)\] (?:Re: )?(?:.+?) \(#(\d+)\)/,
   /\[(.+?)\] .+#(\d+)/,
   /Re: \[(.+?)\] .+#(\d+)/,
+  /\[(.+?)\].*#(\d+)/,
 ];
 
 export const parsePrFromSubject = (subject: string): PrInfo => {
