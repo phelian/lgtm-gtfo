@@ -191,6 +191,71 @@ type BatchMoveResult = {
   errors: string[];
 };
 
+export const batchMarkAsUnread = async (
+  emails: Array<{ account: string; mailbox: string; id: string }>,
+): Promise<BatchMoveResult> => {
+  const byMailbox = new Map<string, typeof emails>();
+
+  for (const email of emails) {
+    const key = `${email.account}|||${email.mailbox}`;
+    const existing = byMailbox.get(key) ?? [];
+    existing.push(email);
+    byMailbox.set(key, existing);
+  }
+
+  const total = emails.length;
+  const result: BatchMoveResult = { succeeded: 0, failed: 0, errors: [] };
+
+  for (const [key, mailboxEmails] of byMailbox.entries()) {
+    const [account, mailbox] = key.split("|||");
+
+    const ids = mailboxEmails.map((e) => e.id).join(", ");
+
+    const script = `
+      set markedCount to 0
+      tell application "Mail"
+        set acct to account "${escapeForAppleScript(account)}"
+        set mbox to mailbox "${escapeForAppleScript(mailbox)}" of acct
+        set targetIds to {${ids}}
+        repeat with targetId in targetIds
+          try
+            set msg to (first message of mbox whose id is targetId)
+            set read status of msg to false
+            set markedCount to markedCount + 1
+          end try
+        end repeat
+      end tell
+      return markedCount
+    `;
+
+    try {
+      const countStr = await runAppleScript(script);
+      const markedCount = parseInt(countStr, 10) || 0;
+      result.succeeded += markedCount;
+      const expectedCount = mailboxEmails.length;
+      if (markedCount < expectedCount) {
+        result.failed += expectedCount - markedCount;
+        result.errors.push(
+          `${mailbox}: expected ${expectedCount}, marked ${markedCount}`,
+        );
+      }
+      console.log(`Marked ${result.succeeded}/${total} emails as unread`);
+    } catch (e) {
+      result.failed += mailboxEmails.length;
+      result.errors.push(`${mailbox}: ${e}`);
+      console.log(`Error marking emails in ${mailbox}: ${e}`);
+    }
+  }
+
+  if (result.errors.length > 0) {
+    console.log(
+      `\nWarnings: ${result.errors.length} issues occurred`,
+    );
+  }
+
+  return result;
+};
+
 export const batchMoveToTrash = async (
   emails: Array<{ account: string; mailbox: string; id: string }>,
 ): Promise<BatchMoveResult> => {
