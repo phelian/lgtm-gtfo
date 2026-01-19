@@ -24,6 +24,7 @@ type Message = {
   };
   receivedDateTime: string;
   webLink: string;
+  bodyPreview?: string;
 };
 
 type GraphResponse<T> = {
@@ -107,7 +108,18 @@ export const fetchGitHubEmails = async (
     const response = await graphFetch<GraphResponse<Message>>(endpoint);
 
     for (const msg of response.value) {
-      const { repo, prNumber } = parsePrFromSubject(msg.subject);
+      let { repo, prNumber } = parsePrFromSubject(msg.subject);
+      if (!prNumber && msg.bodyPreview) {
+        const fallback = parsePrFromSubject(
+          `[${repo ?? "unknown"}] ${msg.bodyPreview}`,
+        );
+        if (fallback.prNumber) {
+          prNumber = fallback.prNumber;
+          if (!repo && fallback.repo && fallback.repo !== "unknown") {
+            repo = fallback.repo;
+          }
+        }
+      }
       emails.push({
         id: msg.id,
         subject: msg.subject,
@@ -127,7 +139,7 @@ export const fetchGitHubEmails = async (
   for (const folder of targetFolders) {
     console.log(`Scanning folder: github/${folder.displayName}`);
     const initialEndpoint =
-      `/me/mailFolders/${folder.id}/messages?$top=100&$select=id,subject,from,receivedDateTime,webLink&$filter=from/emailAddress/address eq 'notifications@github.com'`;
+      `/me/mailFolders/${folder.id}/messages?$top=100&$select=id,subject,from,receivedDateTime,webLink,bodyPreview&$filter=from/emailAddress/address eq 'notifications@github.com'`;
     await fetchPage(initialEndpoint);
   }
 
