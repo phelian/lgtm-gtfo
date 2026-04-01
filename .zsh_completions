@@ -9,6 +9,7 @@ _lgtm_gtfo() {
     '--no-bot[exclude bot PRs from --pending]' \
     '--graph[use Microsoft Graph API]' \
     '--ews[use Exchange Web Services]' \
+    '--tidy[move inbox GitHub emails to github/ subfolders]' \
     '--help[show help]'
 }
 
@@ -28,4 +29,8 @@ todo() {
   deno task lgtm --pending --no-bot "$@"
 }
 
-compdef _lgtm_gtfo lgtm gtfo pending todo
+tidy() {
+  deno task lgtm --tidy "$@"
+}
+
+compdef _lgtm_gtfo lgtm gtfo pending todo tidy

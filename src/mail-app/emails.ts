@@ -329,6 +329,147 @@ export const batchMarkAsUnread = async (
   return result;
 };
 
+const moveEmailsToFolder = async (
+  account: string,
+  parent: string,
+  child: string,
+  ids: number[],
+): Promise<number> => {
+  const script = `
+    set movedCount to 0
+    tell application "Mail"
+      set acct to account "${escapeForAppleScript(account)}"
+      set targetMbox to mailbox "${escapeForAppleScript(child)}" of mailbox "${escapeForAppleScript(parent)}" of acct
+      set targetIds to {${ids.join(", ")}}
+      repeat with targetId in targetIds
+        try
+          set msg to (first message of inbox whose id is targetId)
+          move msg to targetMbox
+          set movedCount to movedCount + 1
+        end try
+      end repeat
+    end tell
+    return movedCount
+  `;
+  const result = await runAppleScript(script);
+  return parseInt(result, 10) || 0;
+};
+
+type OrganizeTarget = {
+  account: string;
+  parentName: string;
+  childName: string;
+  emails: MailAppEmail[];
+  exists: boolean;
+};
+
+export const organizeInboxEmails = async (
+  confirm: boolean,
+): Promise<void> => {
+  console.log("\nScanning inbox for GitHub emails...\n");
+
+  const inboxEmails = await fetchInboxEmails();
+  const githubEmails = inboxEmails.filter((e) => e.repo);
+
+  if (githubEmails.length === 0) {
+    console.log("No GitHub PR emails found in inbox.");
+    return;
+  }
+
+  const mailboxes = await findGitHubMailboxes();
+
+  const githubParents = new Map<string, string>();
+  const existingFolders = new Set<string>();
+
+  for (const { account, mailbox } of mailboxes) {
+    if (!mailbox.includes("/")) {
+      githubParents.set(account, mailbox);
+    } else {
+      const afterSlash = mailbox.slice(mailbox.indexOf("/") + 1);
+      if (!afterSlash.includes("/")) {
+        existingFolders.add(`${account}|||${afterSlash.toLowerCase()}`);
+      }
+    }
+  }
+
+  const targets = new Map<string, OrganizeTarget>();
+  const skipped: MailAppEmail[] = [];
+
+  for (const email of githubEmails) {
+    const parentName = githubParents.get(email.account);
+    if (!parentName) {
+      skipped.push(email);
+      continue;
+    }
+
+    const childName = email.repo!.includes("/")
+      ? email.repo!.split("/").pop()!
+      : email.repo!;
+    const key = `${email.account}|||${childName.toLowerCase()}`;
+
+    if (!targets.has(key)) {
+      const exists = existingFolders.has(key);
+      targets.set(key, { account: email.account, parentName, childName, emails: [], exists });
+    }
+    targets.get(key)!.emails.push(email);
+  }
+
+  if (targets.size === 0) {
+    console.log("No emails to organize.");
+    return;
+  }
+
+  const sorted = [...targets.values()].sort((a, b) =>
+    a.childName.localeCompare(b.childName)
+  );
+  const ready = sorted.filter((t) => t.exists);
+  const missing = sorted.filter((t) => !t.exists);
+  const readyCount = ready.reduce((sum, t) => sum + t.emails.length, 0);
+
+  for (const target of sorted) {
+    const tag = target.exists ? "" : " [MISSING]";
+    console.log(
+      `  ${target.parentName}/${target.childName}${tag}: ${target.emails.length} emails`,
+    );
+  }
+
+  if (missing.length > 0) {
+    console.log(
+      `\nCreate these folders manually in Mail.app (AppleScript can't create Exchange subfolders):`,
+    );
+    for (const t of missing) {
+      console.log(`  ${t.parentName}/${t.childName}`);
+    }
+  }
+
+  if (readyCount === 0) {
+    console.log("\nNo emails to move (all targets need folder creation first).");
+    return;
+  }
+
+  console.log(`\n${readyCount} email(s) ready to move.`);
+
+  if (!confirm) {
+    console.log("Dry run - use --confirm to move emails.");
+    return;
+  }
+
+  let moved = 0;
+  for (const target of ready) {
+    const ids = target.emails.map((e) => parseInt(e.id, 10));
+    const count = await moveEmailsToFolder(
+      target.account,
+      target.parentName,
+      target.childName,
+      ids,
+    );
+    moved += count;
+    console.log(`Moved ${moved}/${readyCount} emails`);
+  }
+
+  console.log(`\nDone! Moved ${moved} emails.`);
+};
+
 export const batchMoveToTrash = async (
   emails: Array<{ account: string; mailbox: string; id: string }>,
 ): Promise<BatchMoveResult> => {

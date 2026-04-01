@@ -9,7 +9,11 @@ import {
   listMyPrs,
   listPendingReviews,
 } from "./github/pr.ts";
-import { batchMarkAsUnread, fetchGitHubEmails } from "./mail-app/emails.ts";
+import {
+  batchMarkAsUnread,
+  fetchGitHubEmails,
+  organizeInboxEmails,
+} from "./mail-app/emails.ts";
 
 const getBotPatterns = (): string[] => {
   const envBots = Deno.env.get("LGTM_BOTS");
@@ -86,6 +90,7 @@ Options:
   --my                      Include your own PRs in --pending
   --mine                    List your open PRs with status (oldest last)
   --nudge                   List bot PRs you reviewed that need another approval (Slack format)
+  --tidy                    Move inbox GitHub emails to github/ subfolders (creates missing folders)
   --unread                  Mark all GitHub emails as unread (mail-app only)
   --org <name>              Filter PRs by organization (or set LGTM_ORG)
   --graph                   Use Microsoft Graph API (requires OAuth)
@@ -125,6 +130,7 @@ export const run = async (args: string[]): Promise<void> => {
       "mine",
       "nudge",
       "unread",
+      "tidy",
       "help",
       "graph",
       "ews",
@@ -154,6 +160,11 @@ export const run = async (args: string[]): Promise<void> => {
 
   if (parsed.nudge) {
     await listBotPrsNeedingReview({ org: parsed.org });
+    return;
+  }
+
+  if (parsed.tidy) {
+    await organizeInboxEmails(parsed.confirm ?? false);
     return;
   }
 
