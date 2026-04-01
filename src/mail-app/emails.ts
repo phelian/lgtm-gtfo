@@ -63,29 +63,155 @@ export const findGitHubMailboxes = async (): Promise<
     });
 };
 
+const fetchInboxEmails = async (): Promise<MailAppEmail[]> => {
+  console.log("Scanning mailbox: Inbox");
+
+  const script = `
+    set output to ""
+    tell application "Mail"
+      set msgs to messages of inbox whose sender contains "github.com"
+      repeat with msg in msgs
+        set msgId to id of msg
+        set msgMessageId to message id of msg
+        set msgSubject to subject of msg
+        set msgMbox to name of mailbox of msg
+        set msgAcct to name of account of mailbox of msg
+        set msgDate to date received of msg
+        set y to year of msgDate
+        set m to (month of msgDate as integer)
+        set d to day of msgDate
+        set h to hours of msgDate
+        set min to minutes of msgDate
+        set isoDate to (y as string) & "-" & (text -2 thru -1 of ("0" & m)) & "-" & (text -2 thru -1 of ("0" & d)) & "T" & (text -2 thru -1 of ("0" & h)) & ":" & (text -2 thru -1 of ("0" & min)) & ":00"
+        set output to output & msgId & "|||" & msgMessageId & "|||" & msgSubject & "|||" & isoDate & "|||" & msgAcct & "|||" & msgMbox & "
+"
+      end repeat
+    end tell
+    return output
+  `;
+
+  try {
+    const result = await runAppleScript(script);
+    if (!result.trim()) return [];
+
+    const emails: MailAppEmail[] = [];
+    const lines = result.split("\n").filter((line) => line.includes("|||"));
+
+    for (const line of lines) {
+      const parts = line.split("|||");
+      if (parts.length >= 6) {
+        const [id, messageId, subject, dateReceived, account, mailbox] = parts;
+        const { repo, prNumber } = parsePrFromSubject(subject);
+
+        emails.push({
+          id: id.trim(),
+          messageId: messageId.trim(),
+          subject: subject.trim(),
+          receivedDateTime: dateReceived.trim(),
+          repo,
+          prNumber,
+          mailbox: mailbox.trim(),
+          account: account.trim(),
+        });
+      }
+    }
+
+    return emails;
+  } catch (e) {
+    console.log(`Error scanning inbox: ${e}`);
+    return [];
+  }
+};
+
+const fetchMailboxEmails = async (
+  account: string,
+  mailbox: string,
+): Promise<MailAppEmail[]> => {
+  console.log(`Scanning mailbox: ${mailbox} (${account})`);
+
+  const script = `
+    set output to ""
+    tell application "Mail"
+      set acct to account "${escapeForAppleScript(account)}"
+      set mbox to mailbox "${escapeForAppleScript(mailbox)}" of acct
+      set msgs to messages of mbox whose sender contains "github.com"
+      repeat with msg in msgs
+        set msgId to id of msg
+        set msgMessageId to message id of msg
+        set msgSubject to subject of msg
+        set msgDate to date received of msg
+        set y to year of msgDate
+        set m to (month of msgDate as integer)
+        set d to day of msgDate
+        set h to hours of msgDate
+        set min to minutes of msgDate
+        set isoDate to (y as string) & "-" & (text -2 thru -1 of ("0" & m)) & "-" & (text -2 thru -1 of ("0" & d)) & "T" & (text -2 thru -1 of ("0" & h)) & ":" & (text -2 thru -1 of ("0" & min)) & ":00"
+        set output to output & msgId & "|||" & msgMessageId & "|||" & msgSubject & "|||" & isoDate & "
+"
+      end repeat
+    end tell
+    return output
+  `;
+
+  try {
+    const result = await runAppleScript(script);
+    if (!result.trim()) return [];
+
+    const emails: MailAppEmail[] = [];
+    const lines = result.split("\n").filter((line) => line.includes("|||"));
+
+    for (const line of lines) {
+      const parts = line.split("|||");
+      if (parts.length >= 4) {
+        const [id, messageId, subject, dateReceived] = parts;
+        const { repo, prNumber } = parsePrFromSubject(subject);
+
+        emails.push({
+          id: id.trim(),
+          messageId: messageId.trim(),
+          subject: subject.trim(),
+          receivedDateTime: dateReceived.trim(),
+          repo,
+          prNumber,
+          mailbox,
+          account,
+        });
+      }
+    }
+
+    return emails;
+  } catch (e) {
+    console.log(`Error scanning ${mailbox}: ${e}`);
+    return [];
+  }
+};
+
 export const fetchGitHubEmails = async (
   folderName?: string,
 ): Promise<MailAppEmail[]> => {
-  const mailboxes = await findGitHubMailboxes();
+  const allEmails: MailAppEmail[] = [];
+  const scanInbox = folderName === undefined ||
+    folderName?.toLowerCase() === "inbox";
+  const scanGithub = folderName === undefined ||
+    (folderName !== undefined && folderName.toLowerCase() !== "inbox");
 
-  if (mailboxes.length === 0) {
-    console.log(
-      "No 'github' mailbox found in Mail.app. Make sure you have a folder named 'github'.",
-    );
-    return [];
-  }
+  if (scanGithub) {
+    const mailboxes = await findGitHubMailboxes();
 
-  const targetMailboxes = folderName
-    ? mailboxes.filter((m) =>
-      m.mailbox.toLowerCase() === `github/${folderName}`.toLowerCase() ||
-      m.mailbox.toLowerCase() === folderName.toLowerCase()
-    )
-    : mailboxes.filter((m) => m.mailbox.includes("/"));
+    if (mailboxes.length === 0 && folderName) {
+      console.log(
+        "No 'github' mailbox found in Mail.app.",
+      );
+    }
 
-  if (targetMailboxes.length === 0) {
-    if (folderName) {
-      console.log(`No folder named '${folderName}' found under github/`);
-    } else {
+    const targetMailboxes = folderName
+      ? mailboxes.filter((m) =>
+        m.mailbox.toLowerCase() === `github/${folderName}`.toLowerCase() ||
+        m.mailbox.toLowerCase() === folderName.toLowerCase()
+      )
+      : mailboxes.filter((m) => m.mailbox.includes("/"));
+
+    if (targetMailboxes.length === 0 && !folderName) {
       const parentOnly = mailboxes.filter((m) => !m.mailbox.includes("/"));
       if (parentOnly.length > 0) {
         console.log(
@@ -93,72 +219,19 @@ export const fetchGitHubEmails = async (
         );
         targetMailboxes.push(...parentOnly);
       }
+    } else if (targetMailboxes.length === 0 && folderName) {
+      console.log(`No folder named '${folderName}' found under github/`);
+    }
+
+    for (const { account, mailbox } of targetMailboxes) {
+      const emails = await fetchMailboxEmails(account, mailbox);
+      allEmails.push(...emails);
     }
   }
 
-  if (targetMailboxes.length === 0) {
-    return [];
-  }
-
-  const allEmails: MailAppEmail[] = [];
-
-  for (const { account, mailbox } of targetMailboxes) {
-    console.log(`Scanning mailbox: ${mailbox} (${account})`);
-
-    const script = `
-      set output to ""
-      tell application "Mail"
-        set acct to account "${escapeForAppleScript(account)}"
-        set mbox to mailbox "${escapeForAppleScript(mailbox)}" of acct
-        set msgs to messages of mbox whose sender contains "github.com"
-        repeat with msg in msgs
-          set msgId to id of msg
-          set msgMessageId to message id of msg
-          set msgSubject to subject of msg
-          set msgDate to date received of msg
-          set y to year of msgDate
-          set m to (month of msgDate as integer)
-          set d to day of msgDate
-          set h to hours of msgDate
-          set min to minutes of msgDate
-          set isoDate to (y as string) & "-" & (text -2 thru -1 of ("0" & m)) & "-" & (text -2 thru -1 of ("0" & d)) & "T" & (text -2 thru -1 of ("0" & h)) & ":" & (text -2 thru -1 of ("0" & min)) & ":00"
-          set output to output & msgId & "|||" & msgMessageId & "|||" & msgSubject & "|||" & isoDate & "
-"
-        end repeat
-      end tell
-      return output
-    `;
-
-    try {
-      const result = await runAppleScript(script);
-
-      if (!result.trim()) {
-        continue;
-      }
-
-      const lines = result.split("\n").filter((line) => line.includes("|||"));
-
-      for (const line of lines) {
-        const parts = line.split("|||");
-        if (parts.length >= 4) {
-          const [id, messageId, subject, dateReceived] = parts;
-          const { repo, prNumber } = parsePrFromSubject(subject);
-
-          allEmails.push({
-            id: id.trim(),
-            messageId: messageId.trim(),
-            subject: subject.trim(),
-            receivedDateTime: dateReceived.trim(),
-            repo,
-            prNumber,
-            mailbox,
-            account,
-          });
-        }
-      }
-    } catch (e) {
-      console.log(`Error scanning ${mailbox}: ${e}`);
-    }
+  if (scanInbox) {
+    const emails = await fetchInboxEmails();
+    allEmails.push(...emails);
   }
 
   return allEmails;

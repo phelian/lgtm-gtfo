@@ -85,23 +85,6 @@ const findGitHubFolders = async (): Promise<MailFolder[]> => {
 export const fetchGitHubEmails = async (
   folderName?: string,
 ): Promise<GraphEmail[]> => {
-  const folders = await findGitHubFolders();
-
-  const targetFolders = folderName
-    ? folders.filter((f) =>
-      f.displayName.toLowerCase() === folderName.toLowerCase()
-    )
-    : folders;
-
-  if (targetFolders.length === 0) {
-    console.log(
-      folderName
-        ? `No folder named '${folderName}' found under github/`
-        : "No github subfolders found.",
-    );
-    return [];
-  }
-
   const emails: GraphEmail[] = [];
 
   const fetchPage = async (endpoint: string): Promise<void> => {
@@ -136,11 +119,34 @@ export const fetchGitHubEmails = async (
     }
   };
 
-  for (const folder of targetFolders) {
-    console.log(`Scanning folder: github/${folder.displayName}`);
-    const initialEndpoint =
-      `/me/mailFolders/${folder.id}/messages?$top=100&$select=id,subject,from,receivedDateTime,webLink,bodyPreview&$filter=from/emailAddress/address eq 'notifications@github.com'`;
-    await fetchPage(initialEndpoint);
+  const msgFilter =
+    `$top=100&$select=id,subject,from,receivedDateTime,webLink,bodyPreview&$filter=from/emailAddress/address eq 'notifications@github.com'`;
+  const scanInbox = folderName === undefined ||
+    folderName?.toLowerCase() === "inbox";
+  const scanGithub = folderName === undefined ||
+    (folderName !== undefined && folderName.toLowerCase() !== "inbox");
+
+  if (scanGithub) {
+    const folders = await findGitHubFolders();
+    const targetFolders = folderName
+      ? folders.filter((f) =>
+        f.displayName.toLowerCase() === folderName.toLowerCase()
+      )
+      : folders;
+
+    if (targetFolders.length === 0 && folderName) {
+      console.log(`No folder named '${folderName}' found under github/`);
+    }
+
+    for (const folder of targetFolders) {
+      console.log(`Scanning folder: github/${folder.displayName}`);
+      await fetchPage(`/me/mailFolders/${folder.id}/messages?${msgFilter}`);
+    }
+  }
+
+  if (scanInbox) {
+    console.log("Scanning folder: Inbox");
+    await fetchPage(`/me/mailFolders/inbox/messages?${msgFilter}`);
   }
 
   return emails;

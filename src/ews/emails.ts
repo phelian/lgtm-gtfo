@@ -118,7 +118,13 @@ const findSubFolders = async (parentFolderId: string): Promise<EwsFolder[]> => {
   return folders;
 };
 
-const findEmailsInFolder = async (folderId: string): Promise<EwsEmail[]> => {
+const findEmailsInFolder = async (
+  folderId: string,
+  distinguished = false,
+): Promise<EwsEmail[]> => {
+  const folderIdXml = distinguished
+    ? `<t:DistinguishedFolderId Id="${folderId}"/>`
+    : `<t:FolderId Id="${folderId}"/>`;
   const body = `
     <m:FindItem Traversal="Shallow">
       <m:ItemShape>
@@ -137,7 +143,7 @@ const findEmailsInFolder = async (folderId: string): Promise<EwsEmail[]> => {
         </t:Contains>
       </m:Restriction>
       <m:ParentFolderIds>
-        <t:FolderId Id="${folderId}"/>
+        ${folderIdXml}
       </m:ParentFolderIds>
     </m:FindItem>`;
 
@@ -170,36 +176,46 @@ const findEmailsInFolder = async (folderId: string): Promise<EwsEmail[]> => {
 export const fetchGitHubEmails = async (
   folderName?: string,
 ): Promise<EwsEmail[]> => {
-  const githubFolder = await findGitHubFolder();
-
-  if (!githubFolder) {
-    console.log("No 'github' folder found in mailbox.");
-    return [];
-  }
-
-  const subFolders = await findSubFolders(githubFolder.id);
-  const targetFolders = subFolders.length > 0 ? subFolders : [githubFolder];
-
-  const filteredFolders = folderName
-    ? targetFolders.filter((f) =>
-      f.displayName.toLowerCase() === folderName.toLowerCase()
-    )
-    : targetFolders;
-
-  if (filteredFolders.length === 0) {
-    console.log(
-      folderName
-        ? `No folder named '${folderName}' found under github/`
-        : "No github subfolders found.",
-    );
-    return [];
-  }
-
   const allEmails: EwsEmail[] = [];
+  const scanInbox = folderName === undefined ||
+    folderName?.toLowerCase() === "inbox";
+  const scanGithub = folderName === undefined ||
+    (folderName !== undefined && folderName.toLowerCase() !== "inbox");
 
-  for (const folder of filteredFolders) {
-    console.log(`Scanning folder: github/${folder.displayName}`);
-    const emails = await findEmailsInFolder(folder.id);
+  if (scanGithub) {
+    const githubFolder = await findGitHubFolder();
+
+    if (!githubFolder) {
+      if (folderName) {
+        console.log("No 'github' folder found in mailbox.");
+      }
+    } else {
+      const subFolders = await findSubFolders(githubFolder.id);
+      const targetFolders = subFolders.length > 0 ? subFolders : [githubFolder];
+
+      const filteredFolders = folderName
+        ? targetFolders.filter((f) =>
+          f.displayName.toLowerCase() === folderName.toLowerCase()
+        )
+        : targetFolders;
+
+      if (filteredFolders.length === 0 && folderName) {
+        console.log(
+          `No folder named '${folderName}' found under github/`,
+        );
+      }
+
+      for (const folder of filteredFolders) {
+        console.log(`Scanning folder: github/${folder.displayName}`);
+        const emails = await findEmailsInFolder(folder.id);
+        allEmails.push(...emails);
+      }
+    }
+  }
+
+  if (scanInbox) {
+    console.log("Scanning folder: Inbox");
+    const emails = await findEmailsInFolder("inbox", true);
     allEmails.push(...emails);
   }
 
