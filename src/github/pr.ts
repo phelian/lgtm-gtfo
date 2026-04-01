@@ -310,17 +310,17 @@ export const listPendingReviews = async (
     author: { login: string };
   };
 
-  let results: SearchResult[] = JSON.parse(new TextDecoder().decode(stdout));
+  const results: SearchResult[] = JSON.parse(new TextDecoder().decode(stdout));
 
-  if (options.excludeBots) {
-    const before = results.length;
-    results = results.filter(
-      (pr) =>
-        !BOT_AUTHORS.some((bot) => pr.author.login.toLowerCase().includes(bot)),
+  const botCount = options.excludeBots
+    ? results.filter((pr) =>
+      BOT_AUTHORS.some((bot) => pr.author.login.toLowerCase().includes(bot))
+    ).length
+    : 0;
+  if (botCount > 0) {
+    console.log(
+      `Checking ${botCount} bot PR(s) for personal review requests...`,
     );
-    if (before !== results.length) {
-      console.log(`Excluded ${before - results.length} bot PRs`);
-    }
   }
 
   const reviewRequestedKeys = new Set(
@@ -363,7 +363,8 @@ export const listPendingReviews = async (
           prResult.author &&
           BOT_AUTHORS.some((bot) =>
             prResult.author!.toLowerCase().includes(bot)
-          )
+          ) &&
+          !prResult.wasRequestedReviewer
         ) {
           continue;
         }
@@ -430,7 +431,7 @@ export const listPendingReviews = async (
         "--repo",
         pr.repo,
         "--json",
-        "reviews,reviewDecision,autoMergeRequest",
+        "reviews,reviewDecision,autoMergeRequest,reviewRequests",
       ],
       stdout: "piped",
       stderr: "piped",
@@ -452,11 +453,22 @@ export const listPendingReviews = async (
       reviews: Array<{ author: { login: string }; state: string }>;
       reviewDecision: string;
       autoMergeRequest: unknown | null;
+      reviewRequests: Array<{ login?: string }>;
     };
 
     const reviewData: ReviewDetail = JSON.parse(
       new TextDecoder().decode(detail.stdout),
     );
+
+    if (
+      options.excludeBots &&
+      BOT_AUTHORS.some((bot) => pr.author.toLowerCase().includes(bot))
+    ) {
+      const personallyRequested = reviewData.reviewRequests?.some(
+        (r) => r.login?.toLowerCase() === user.toLowerCase(),
+      );
+      if (!personallyRequested) return null;
+    }
 
     if (reviewData.autoMergeRequest !== null) return null;
 
