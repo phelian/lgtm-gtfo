@@ -92,6 +92,10 @@ Options:
   --ews                     Use Exchange Web Services (requires OAuth)
   --help                    Show this help message
 
+Files:
+  .exclude                  One pattern per line to hide PRs from --pending
+                            (matches against url, repo, title, author; # comments)
+
 Environment:
   LGTM_BACKEND              Backend: graph (default), ews, or mail-app
   LGTM_ORG                  Filter PRs by organization

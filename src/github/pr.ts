@@ -35,6 +35,21 @@ export type PrCheckResult = {
   error?: string;
 };
 
+const loadExcludePatterns = async (): Promise<string[]> => {
+  const root = new URL("../../", import.meta.url);
+  const excludePath = new URL(".exclude", root);
+  try {
+    const text = await Deno.readTextFile(excludePath);
+    return text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0 && !line.startsWith("#"))
+      .map((line) => line.toLowerCase());
+  } catch {
+    return [];
+  }
+};
+
 const cache = new Map<string, PrCheckResult>();
 
 const createUserCache = () => {
@@ -501,7 +516,27 @@ export const listPendingReviews = async (
   };
 
   const prResults = await runWithConcurrency(allPrsToFetch, 10, fetchPrDetails);
-  const pendingPrs = prResults.filter((p): p is PendingPr => p !== null);
+  const unfilteredPending = prResults.filter((p): p is PendingPr => p !== null);
+
+  const excludePatterns = await loadExcludePatterns();
+  const matchesExclude = (
+    pr: { url: string; repo: string; title: string; author: string },
+  ) =>
+    excludePatterns.some((pat) =>
+      pr.url.toLowerCase().includes(pat) ||
+      pr.repo.toLowerCase().includes(pat) ||
+      pr.title.toLowerCase().includes(pat) ||
+      pr.author.toLowerCase().includes(pat)
+    );
+
+  const pendingPrs = excludePatterns.length > 0
+    ? unfilteredPending.filter((p) => !matchesExclude(p))
+    : unfilteredPending;
+
+  const excludedCount = unfilteredPending.length - pendingPrs.length;
+  if (excludedCount > 0) {
+    console.log(`\n  Excluded ${excludedCount} PR(s) via .exclude`);
+  }
 
   console.log("\n");
 
@@ -591,9 +626,18 @@ export const listPendingReviews = async (
   };
 
   if (myPrsResult.code === 0) {
-    const myPrs: MyPrResult[] = JSON.parse(
+    const allMyPrs: MyPrResult[] = JSON.parse(
       new TextDecoder().decode(myPrsResult.stdout),
     );
+    const myPrs = excludePatterns.length > 0
+      ? allMyPrs.filter((pr) =>
+        !excludePatterns.some((pat) =>
+          pr.url.toLowerCase().includes(pat) ||
+          pr.repository.nameWithOwner.toLowerCase().includes(pat) ||
+          pr.title.toLowerCase().includes(pat)
+        )
+      )
+      : allMyPrs;
 
     if (myPrs.length > 0) {
       console.log(`${"=".repeat(60)}`);
