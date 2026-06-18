@@ -22,6 +22,7 @@ export type ProcessOptions = {
   ciDays?: number;
   confirm: boolean;
   backend: Backend;
+  force?: boolean;
 };
 
 type PrEmailToDelete = {
@@ -85,6 +86,7 @@ export const processEmails = async (options: ProcessOptions): Promise<void> => {
 
     const prResults = await batchCheckPrs(
       prEmails.map((e) => ({ repo: e.repo!, prNumber: e.prNumber! })),
+      options.force ?? false,
     );
 
     for (const email of prEmails) {
@@ -101,11 +103,17 @@ export const processEmails = async (options: ProcessOptions): Promise<void> => {
         continue;
       }
 
-      if (!options.skipMentions && prResult.wasMentioned) {
+      if (
+        prResult.state !== "MERGED" && !options.skipMentions &&
+        prResult.wasMentioned
+      ) {
         continue;
       }
 
-      if (!options.skipReviewRequests && prResult.wasRequestedReviewer) {
+      if (
+        prResult.state !== "MERGED" && !options.skipReviewRequests &&
+        prResult.wasRequestedReviewer
+      ) {
         continue;
       }
 
@@ -199,6 +207,7 @@ export const processEmails = async (options: ProcessOptions): Promise<void> => {
           account: e.account!,
           mailbox: e.mailbox!,
           id: e.id,
+          messageId: e.messageId,
         })),
       );
       break;

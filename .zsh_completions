@@ -7,9 +7,12 @@ _lgtm_gtfo() {
     '--ci-days=[delete CI emails older than N days]:days' \
     '--pending[list PRs waiting for review]' \
     '--no-bot[exclude bot PRs from --pending]' \
+    '--include-blocked[show PRs gated by teams you are not in]' \
     '--graph[use Microsoft Graph API]' \
     '--ews[use Exchange Web Services]' \
-    '--tidy[move inbox GitHub emails to github/ subfolders]' \
+    '--tidy[tidy inbox: move GitHub emails to subfolders, delete canceled meetings]' \
+    '--force[bypass PR cache (15 min TTL)]' \
+    '--clear-cache[delete the PR cache and exit]' \
     '--help[show help]'
 }
 

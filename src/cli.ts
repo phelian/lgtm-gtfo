@@ -14,6 +14,11 @@ import {
   fetchGitHubEmails,
   organizeInboxEmails,
 } from "./mail-app/emails.ts";
+import {
+  clearPrCache,
+  printPrCacheStats,
+  savePrCache,
+} from "./shared/pr-cache.ts";
 
 const getBotPatterns = (): string[] => {
   const envBots = Deno.env.get("LGTM_BOTS");
@@ -88,11 +93,14 @@ Options:
   --pending                 List PRs waiting for your review (no email deletion)
   --no-bot                  Exclude bot PRs (dependabot) from --pending/--unread
   --my                      Include your own PRs in --pending
+  --include-blocked         In --pending, show PRs gated by teams you aren't in
   --mine                    List your open PRs with status (oldest last)
   --nudge                   List bot PRs you reviewed that need another approval (Slack format)
-  --tidy                    Move inbox GitHub emails to github/ subfolders (creates missing folders)
+  --tidy                    Tidy inbox: route GitHub emails to subfolders, delete canceled/past meetings
   --unread                  Mark all GitHub emails as unread (mail-app only)
   --org <name>              Filter PRs by organization (or set LGTM_ORG)
+  --force                   Bypass PR cache (default TTL: 15 min)
+  --clear-cache             Delete the PR cache and exit
   --graph                   Use Microsoft Graph API (requires OAuth)
   --ews                     Use Exchange Web Services (requires OAuth)
   --help                    Show this help message
@@ -134,6 +142,9 @@ export const run = async (args: string[]): Promise<void> => {
       "help",
       "graph",
       "ews",
+      "force",
+      "clear-cache",
+      "include-blocked",
     ],
     string: ["folder", "ci-days", "org"],
     alias: {
@@ -146,6 +157,12 @@ export const run = async (args: string[]): Promise<void> => {
     return;
   }
 
+  if (parsed["clear-cache"]) {
+    await clearPrCache();
+    console.log("PR cache cleared.");
+    return;
+  }
+
   const envBackend = Deno.env.get("LGTM_BACKEND") as Backend | undefined;
   const backend: Backend = parsed.graph
     ? "graph"
@@ -153,52 +170,62 @@ export const run = async (args: string[]): Promise<void> => {
     ? "ews"
     : envBackend ?? "graph";
 
-  if (parsed.mine) {
-    await listMyPrs({ org: parsed.org });
-    return;
-  }
+  const force = parsed.force ?? false;
 
-  if (parsed.nudge) {
-    await listBotPrsNeedingReview({ org: parsed.org });
-    return;
-  }
+  try {
+    if (parsed.mine) {
+      await listMyPrs({ org: parsed.org, force });
+      return;
+    }
 
-  if (parsed.tidy) {
-    await organizeInboxEmails(parsed.confirm ?? false);
-    return;
-  }
+    if (parsed.nudge) {
+      await listBotPrsNeedingReview({ org: parsed.org, force });
+      return;
+    }
 
-  if (parsed.unread) {
-    await markGitHubEmailsUnread({
+    if (parsed.tidy) {
+      await organizeInboxEmails(parsed.confirm ?? false);
+      return;
+    }
+
+    if (parsed.unread) {
+      await markGitHubEmailsUnread({
+        folder: parsed.folder,
+        excludeBots: parsed["no-bot"],
+      });
+      return;
+    }
+
+    if (parsed.pending) {
+      await listPendingReviews({
+        excludeBots: parsed["no-bot"],
+        includeMine: parsed["my"],
+        includeBlocked: parsed["include-blocked"],
+        backend,
+        folder: parsed.folder,
+        org: parsed.org,
+        force,
+      });
+      return;
+    }
+
+    const ciDays = parsed["ci-days"]
+      ? parseInt(parsed["ci-days"], 10)
+      : undefined;
+
+    const options: ProcessOptions = {
       folder: parsed.folder,
-      excludeBots: parsed["no-bot"],
-    });
-    return;
-  }
-
-  if (parsed.pending) {
-    await listPendingReviews({
-      excludeBots: parsed["no-bot"],
-      includeMine: parsed["my"],
+      skipMentions: parsed["skip-mentions"] ?? false,
+      skipReviewRequests: parsed["skip-review-requests"] ?? false,
+      ciDays,
+      confirm: parsed.confirm ?? false,
       backend,
-      folder: parsed.folder,
-      org: parsed.org,
-    });
-    return;
+      force,
+    };
+
+    await processEmails(options);
+  } finally {
+    printPrCacheStats();
+    await savePrCache();
   }
-
-  const ciDays = parsed["ci-days"]
-    ? parseInt(parsed["ci-days"], 10)
-    : undefined;
-
-  const options: ProcessOptions = {
-    folder: parsed.folder,
-    skipMentions: parsed["skip-mentions"] ?? false,
-    skipReviewRequests: parsed["skip-review-requests"] ?? false,
-    ciDays,
-    confirm: parsed.confirm ?? false,
-    backend,
-  };
-
-  await processEmails(options);
 };

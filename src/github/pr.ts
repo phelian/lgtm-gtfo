@@ -2,6 +2,12 @@ import { fetchGitHubEmails as fetchGraphEmails } from "../ms-graph/emails.ts";
 import { fetchGitHubEmails as fetchEwsEmails } from "../ews/emails.ts";
 import { fetchGitHubEmails as fetchMailAppEmails } from "../mail-app/emails.ts";
 import type { UnifiedEmail } from "../shared/types.ts";
+import { cachedGhPrView, PR_FIELDS } from "../shared/pr-cache.ts";
+import {
+  cleanupHidden,
+  loadHiddenPrs,
+  saveHiddenPrs,
+} from "../shared/hidden-prs.ts";
 
 type Backend = "mail-app" | "graph" | "ews";
 
@@ -15,6 +21,7 @@ type ReviewRequest = {
 
 type PrInfo = {
   state: PrState;
+  isDraft: boolean;
   author: { login: string };
   title: string;
   body: string;
@@ -27,12 +34,62 @@ export type PrCheckResult = {
   prNumber: number;
   state: PrState;
   isMerged: boolean;
+  isDraft: boolean;
   isInMergeQueue: boolean;
   wasRequestedReviewer: boolean;
   wasMentioned: boolean;
   author?: string;
   title?: string;
   error?: string;
+};
+
+type UserTeamsResult = { ok: boolean; teams: Set<string> };
+
+const userTeamsState: { promise?: Promise<UserTeamsResult> } = {};
+
+const getUserTeams = (): Promise<UserTeamsResult> => {
+  if (!userTeamsState.promise) {
+    userTeamsState.promise = (async () => {
+      const cmd = new Deno.Command("gh", {
+        args: [
+          "api",
+          "user/teams",
+          "--paginate",
+          "--jq",
+          '.[] | "\\(.organization.login)/\\(.slug)"',
+        ],
+        stdout: "piped",
+        stderr: "piped",
+      });
+      const { code, stdout } = await cmd.output();
+      if (code !== 0) return { ok: false, teams: new Set<string>() };
+      const text = new TextDecoder().decode(stdout);
+      const teams = new Set(
+        text.split("\n").map((l) => l.trim().toLowerCase()).filter(Boolean),
+      );
+      return { ok: true, teams };
+    })();
+  }
+  return userTeamsState.promise;
+};
+
+const normalizeTeamSlug = (slug: string, repo: string): string => {
+  const lower = slug.toLowerCase();
+  if (lower.includes("/")) return lower;
+  return `${repo.split("/")[0].toLowerCase()}/${lower}`;
+};
+
+const isBlockedByUnreachableTeam = async (
+  repo: string,
+  reviewRequests: ReviewRequest[],
+): Promise<boolean> => {
+  const teamRequests = reviewRequests.filter((r) => r.slug && !r.login);
+  if (teamRequests.length === 0) return false;
+  const userTeams = await getUserTeams();
+  if (!userTeams.ok) return false;
+  return teamRequests.some(
+    (t) => !userTeams.teams.has(normalizeTeamSlug(t.slug!, repo)),
+  );
 };
 
 const loadExcludePatterns = async (): Promise<string[]> => {
@@ -49,8 +106,6 @@ const loadExcludePatterns = async (): Promise<string[]> => {
     return [];
   }
 };
-
-const cache = new Map<string, PrCheckResult>();
 
 const createUserCache = () => {
   let cachedUser: string | null = null;
@@ -93,51 +148,29 @@ export const getGitHubUser = createUserCache();
 export const checkPr = async (
   repo: string,
   prNumber: number,
+  force = false,
 ): Promise<PrCheckResult> => {
-  const cacheKey = `${repo}#${prNumber}`;
-
-  const cached = cache.get(cacheKey);
-  if (cached) {
-    return cached;
-  }
-
   const user = await getGitHubUser();
 
-  const command = new Deno.Command("gh", {
-    args: [
-      "pr",
-      "view",
-      String(prNumber),
-      "--repo",
-      repo,
-      "--json",
-      "state,author,title,body,reviewRequests,autoMergeRequest",
-    ],
-    stdout: "piped",
-    stderr: "piped",
-  });
+  const result = await cachedGhPrView(repo, prNumber, PR_FIELDS, force);
 
-  const { code, stdout, stderr } = await command.output();
-
-  if (code !== 0) {
-    const error = new TextDecoder().decode(stderr);
-    const result: PrCheckResult = {
+  if (!result.ok) {
+    return {
       repo,
       prNumber,
       state: "CLOSED",
+      isDraft: false,
       isMerged: false,
       isInMergeQueue: false,
       wasRequestedReviewer: false,
       wasMentioned: false,
-      error: error.includes("Could not resolve")
+      error: result.error.includes("Could not resolve")
         ? "PR not found"
-        : error.trim(),
+        : result.error.trim(),
     };
-    cache.set(cacheKey, result);
-    return result;
   }
 
-  const prInfo: PrInfo = JSON.parse(new TextDecoder().decode(stdout));
+  const prInfo: PrInfo = JSON.parse(result.data);
 
   const wasRequestedReviewer = prInfo.reviewRequests.some(
     (r) => r.login?.toLowerCase() === user.toLowerCase(),
@@ -146,10 +179,11 @@ export const checkPr = async (
   const mentionPattern = new RegExp(`@${user}\\b`, "i");
   const wasMentioned = mentionPattern.test(prInfo.body ?? "");
 
-  const result: PrCheckResult = {
+  return {
     repo,
     prNumber,
     state: prInfo.state,
+    isDraft: prInfo.isDraft,
     isMerged: prInfo.state === "MERGED",
     isInMergeQueue: prInfo.autoMergeRequest !== null,
     wasRequestedReviewer,
@@ -157,9 +191,6 @@ export const checkPr = async (
     author: prInfo.author.login,
     title: prInfo.title,
   };
-
-  cache.set(cacheKey, result);
-  return result;
 };
 
 const runWithConcurrency = async <T, R>(
@@ -189,6 +220,7 @@ const runWithConcurrency = async <T, R>(
 
 export const batchCheckPrs = async (
   prs: Array<{ repo: string; prNumber: number }>,
+  force = false,
 ): Promise<Map<string, PrCheckResult>> => {
   const results = new Map<string, PrCheckResult>();
   const uniqueKeys = [...new Set(prs.map((p) => `${p.repo}#${p.prNumber}`))];
@@ -206,7 +238,7 @@ export const batchCheckPrs = async (
     uniquePrs,
     concurrency,
     async ({ repo, prNumber, key }) => {
-      const result = await checkPr(repo, prNumber);
+      const result = await checkPr(repo, prNumber, force);
       checked++;
       if (checked % 10 === 0 || checked === uniquePrs.length) {
         console.log(`Checked ${checked}/${uniquePrs.length} PRs`);
@@ -236,9 +268,11 @@ type PendingPr = {
 type PendingReviewsOptions = {
   excludeBots?: boolean;
   includeMine?: boolean;
+  includeBlocked?: boolean;
   backend?: Backend;
   folder?: string;
   org?: string;
+  force?: boolean;
 };
 
 const getBotAuthors = (): string[] => {
@@ -250,6 +284,11 @@ const getBotAuthors = (): string[] => {
 };
 
 const BOT_AUTHORS = getBotAuthors();
+
+const isBotLogin = (login: string): boolean =>
+  /\[bot\]$/i.test(login) ||
+  /^app\//i.test(login) ||
+  BOT_AUTHORS.some((bot) => login.toLowerCase().includes(bot));
 
 const fetchInboxEmails = async (
   backend: Backend,
@@ -295,7 +334,7 @@ export const listPendingReviews = async (
     "--state",
     "open",
     "--json",
-    "repository,number,title,url,author",
+    "repository,number,title,url,author,isDraft",
     "--limit",
     "100",
   ];
@@ -323,14 +362,22 @@ export const listPendingReviews = async (
     title: string;
     url: string;
     author: { login: string };
+    isDraft: boolean;
   };
 
-  const results: SearchResult[] = JSON.parse(new TextDecoder().decode(stdout));
+  const allResults: SearchResult[] = JSON.parse(
+    new TextDecoder().decode(stdout),
+  );
+
+  const draftCount = allResults.filter((r) => r.isDraft).length;
+  if (draftCount > 0) {
+    console.log(`Skipping ${draftCount} draft PR(s)`);
+  }
+
+  const results = allResults.filter((r) => !r.isDraft);
 
   const botCount = options.excludeBots
-    ? results.filter((pr) =>
-      BOT_AUTHORS.some((bot) => pr.author.login.toLowerCase().includes(bot))
-    ).length
+    ? results.filter((pr) => isBotLogin(pr.author.login)).length
     : 0;
   if (botCount > 0) {
     console.log(
@@ -359,6 +406,7 @@ export const listPendingReviews = async (
       console.log(`Checking ${prEmails.length} PR emails...`);
       const prResults = await batchCheckPrs(
         prEmails.map((e) => ({ repo: e.repo!, prNumber: e.prNumber! })),
+        options.force ?? false,
       );
 
       const seen = new Set<string>();
@@ -371,14 +419,13 @@ export const listPendingReviews = async (
         const prResult = prResults.get(key);
         if (!prResult || prResult.error) continue;
         if (prResult.state !== "OPEN") continue;
+        if (prResult.isDraft) continue;
         if (prResult.isInMergeQueue) continue;
 
         if (
           options.excludeBots &&
           prResult.author &&
-          BOT_AUTHORS.some((bot) =>
-            prResult.author!.toLowerCase().includes(bot)
-          ) &&
+          isBotLogin(prResult.author) &&
           !prResult.wasRequestedReviewer
         ) {
           continue;
@@ -436,23 +483,15 @@ export const listPendingReviews = async (
   }
 
   let processed = 0;
+  let blockedCount = 0;
 
   const fetchPrDetails = async (pr: PrToFetch): Promise<PendingPr | null> => {
-    const detailCmd = new Deno.Command("gh", {
-      args: [
-        "pr",
-        "view",
-        String(pr.number),
-        "--repo",
-        pr.repo,
-        "--json",
-        "reviews,reviewDecision,autoMergeRequest,reviewRequests",
-      ],
-      stdout: "piped",
-      stderr: "piped",
-    });
-
-    const detail = await detailCmd.output();
+    const detail = await cachedGhPrView(
+      pr.repo,
+      pr.number,
+      PR_FIELDS,
+      options.force ?? false,
+    );
 
     processed++;
     const pct = Math.round((processed / allPrsToFetch.length) * 100);
@@ -462,23 +501,21 @@ export const listPendingReviews = async (
       ),
     );
 
-    if (detail.code !== 0) return null;
+    if (!detail.ok) return null;
 
     type ReviewDetail = {
       reviews: Array<{ author: { login: string }; state: string }>;
       reviewDecision: string;
+      isDraft: boolean;
       autoMergeRequest: unknown | null;
-      reviewRequests: Array<{ login?: string }>;
+      reviewRequests: ReviewRequest[];
     };
 
-    const reviewData: ReviewDetail = JSON.parse(
-      new TextDecoder().decode(detail.stdout),
-    );
+    const reviewData: ReviewDetail = JSON.parse(detail.data);
 
-    if (
-      options.excludeBots &&
-      BOT_AUTHORS.some((bot) => pr.author.toLowerCase().includes(bot))
-    ) {
+    if (reviewData.isDraft) return null;
+
+    if (options.excludeBots && isBotLogin(pr.author)) {
       const personallyRequested = reviewData.reviewRequests?.some(
         (r) => r.login?.toLowerCase() === user.toLowerCase(),
       );
@@ -487,14 +524,22 @@ export const listPendingReviews = async (
 
     if (reviewData.autoMergeRequest !== null) return null;
 
-    const approvals = reviewData.reviews.filter(
-      (r) => r.state === "APPROVED",
-    ).length;
+    if (
+      !options.includeBlocked &&
+      reviewData.reviewDecision === "REVIEW_REQUIRED" &&
+      await isBlockedByUnreachableTeam(pr.repo, reviewData.reviewRequests)
+    ) {
+      blockedCount++;
+      return null;
+    }
 
-    const userApproved = reviewData.reviews.some(
-      (r) =>
-        r.state === "APPROVED" &&
-        r.author.login.toLowerCase() === user.toLowerCase(),
+    const humanApprovals = reviewData.reviews.filter(
+      (r) => r.state === "APPROVED" && !isBotLogin(r.author.login),
+    );
+    const approvals = humanApprovals.length;
+
+    const userApproved = humanApprovals.some(
+      (r) => r.author.login.toLowerCase() === user.toLowerCase(),
     );
 
     const approvalsNeeded = reviewData.reviewDecision === "APPROVED"
@@ -529,13 +574,26 @@ export const listPendingReviews = async (
       pr.author.toLowerCase().includes(pat)
     );
 
-  const pendingPrs = excludePatterns.length > 0
+  const filteredByExclude = excludePatterns.length > 0
     ? unfilteredPending.filter((p) => !matchesExclude(p))
     : unfilteredPending;
 
-  const excludedCount = unfilteredPending.length - pendingPrs.length;
+  const hidden = await loadHiddenPrs();
+  const pendingPrs = filteredByExclude.filter((p) => !hidden.has(p.url));
+  const hiddenCount = filteredByExclude.length - pendingPrs.length;
+
+  const excludedCount = unfilteredPending.length - filteredByExclude.length;
   if (excludedCount > 0) {
     console.log(`\n  Excluded ${excludedCount} PR(s) via .exclude`);
+  }
+  if (hiddenCount > 0) {
+    console.log(`\n  Hid ${hiddenCount} PR(s) via interactive hide`);
+  }
+
+  if (blockedCount > 0) {
+    console.log(
+      `\n  Hid ${blockedCount} PR(s) gated by teams you're not in (use --include-blocked to see)`,
+    );
   }
 
   console.log("\n");
@@ -545,12 +603,21 @@ export const listPendingReviews = async (
   const needsMoreApprovals = pendingPrs.filter((p) => p.approvalsNeeded > 1);
   const approved = pendingPrs.filter((p) => p.approvalsNeeded === 0);
 
+  const numberedList = [
+    ...needsOneApproval,
+    ...needsMoreApprovals,
+    ...changesRequested,
+    ...approved,
+  ];
+  const numberByUrl = new Map(numberedList.map((p, i) => [p.url, i + 1]));
+  const tagOf = (pr: PendingPr) => `[${numberByUrl.get(pr.url)}]`;
+
   if (needsOneApproval.length > 0) {
     console.log(`${"=".repeat(60)}`);
     console.log(`🔥 NEEDS 1 MORE APPROVAL (${needsOneApproval.length}):\n`);
     for (const pr of needsOneApproval) {
       const youApproved = pr.userApproved ? " (you approved)" : "";
-      console.log(`  ${pr.repo}#${pr.number}${youApproved}`);
+      console.log(`  ${tagOf(pr)} ${pr.repo}#${pr.number}${youApproved}`);
       console.log(`    ${pr.title}`);
       console.log(`    by ${pr.author} | ${pr.url}`);
       console.log();
@@ -563,7 +630,9 @@ export const listPendingReviews = async (
     for (const pr of needsMoreApprovals) {
       const youApproved = pr.userApproved ? " (you approved)" : "";
       console.log(
-        `  ${pr.repo}#${pr.number} (${pr.approvals} approvals)${youApproved}`,
+        `  ${
+          tagOf(pr)
+        } ${pr.repo}#${pr.number} (${pr.approvals} approvals)${youApproved}`,
       );
       console.log(`    ${pr.title}`);
       console.log(`    by ${pr.author} | ${pr.url}`);
@@ -575,7 +644,7 @@ export const listPendingReviews = async (
     console.log(`${"=".repeat(60)}`);
     console.log(`🔄 CHANGES REQUESTED (${changesRequested.length}):\n`);
     for (const pr of changesRequested) {
-      console.log(`  ${pr.repo}#${pr.number}`);
+      console.log(`  ${tagOf(pr)} ${pr.repo}#${pr.number}`);
       console.log(`    ${pr.title}`);
       console.log(`    by ${pr.author} | ${pr.url}`);
       console.log();
@@ -586,12 +655,44 @@ export const listPendingReviews = async (
     console.log(`${"=".repeat(60)}`);
     console.log(`✅ APPROVED (waiting to merge) (${approved.length}):\n`);
     for (const pr of approved) {
-      console.log(`  ${pr.repo}#${pr.number}`);
+      console.log(`  ${tagOf(pr)} ${pr.repo}#${pr.number}`);
       console.log(`    ${pr.title}`);
       console.log(`    by ${pr.author} | ${pr.url}`);
       console.log();
     }
   }
+
+  if (numberedList.length > 0 && Deno.stdin.isTerminal()) {
+    await Deno.stdout.write(
+      new TextEncoder().encode(
+        "Hide which? (e.g. 1 3 5, empty to skip): ",
+      ),
+    );
+    const buf = new Uint8Array(1024);
+    const n = await Deno.stdin.read(buf);
+    const input = n ? new TextDecoder().decode(buf.subarray(0, n)).trim() : "";
+    if (input) {
+      const picks = input
+        .split(/[\s,]+/)
+        .map((s) => parseInt(s, 10))
+        .filter(
+          (num) =>
+            Number.isInteger(num) && num >= 1 && num <= numberedList.length,
+        );
+      for (const num of picks) {
+        hidden.add(numberedList[num - 1].url);
+      }
+      if (picks.length > 0) {
+        console.log(`Hidden ${picks.length} PR(s).`);
+      }
+    }
+  }
+
+  const autoCleared = await cleanupHidden(hidden);
+  if (autoCleared > 0) {
+    console.log(`Cleared ${autoCleared} closed/merged from hidden list.`);
+  }
+  await saveHiddenPrs(hidden);
 
   const myPrsArgs = [
     "search",
@@ -664,10 +765,12 @@ export const listPendingReviews = async (
 
 type MyPrsOptions = {
   org?: string;
+  force?: boolean;
 };
 
 type BotPrsOptions = {
   org?: string;
+  force?: boolean;
 };
 
 export const listMyPrs = async (options: MyPrsOptions = {}): Promise<void> => {
@@ -729,21 +832,12 @@ export const listMyPrs = async (options: MyPrsOptions = {}): Promise<void> => {
 
   let processed = 0;
   const fetchReviewStatus = async (pr: SearchResult): Promise<MyPr> => {
-    const detailCmd = new Deno.Command("gh", {
-      args: [
-        "pr",
-        "view",
-        String(pr.number),
-        "--repo",
-        pr.repository.nameWithOwner,
-        "--json",
-        "reviewDecision",
-      ],
-      stdout: "piped",
-      stderr: "piped",
-    });
-
-    const detail = await detailCmd.output();
+    const detail = await cachedGhPrView(
+      pr.repository.nameWithOwner,
+      pr.number,
+      PR_FIELDS,
+      options.force ?? false,
+    );
     processed++;
     Deno.stdout.writeSync(
       new TextEncoder().encode(
@@ -751,11 +845,11 @@ export const listMyPrs = async (options: MyPrsOptions = {}): Promise<void> => {
       ),
     );
 
-    if (detail.code !== 0) {
+    if (!detail.ok) {
       return { ...pr, reviewDecision: "" };
     }
 
-    const data = JSON.parse(new TextDecoder().decode(detail.stdout));
+    const data = JSON.parse(detail.data);
     return { ...pr, reviewDecision: data.reviewDecision ?? "" };
   };
 
@@ -868,37 +962,28 @@ export const listBotPrsNeedingReview = async (
   const checkPrReviews = async (
     pr: SearchResult,
   ): Promise<PrWithReviews | null> => {
-    const detailCmd = new Deno.Command("gh", {
-      args: [
-        "pr",
-        "view",
-        String(pr.number),
-        "--repo",
-        pr.repository.nameWithOwner,
-        "--json",
-        "reviews",
-      ],
-      stdout: "piped",
-      stderr: "piped",
-    });
-
-    const detail = await detailCmd.output();
+    const detail = await cachedGhPrView(
+      pr.repository.nameWithOwner,
+      pr.number,
+      PR_FIELDS,
+      options.force ?? false,
+    );
     processed++;
     Deno.stdout.writeSync(
       new TextEncoder().encode(`\r  [${processed}/${botPrs.length}]`),
     );
 
-    if (detail.code !== 0) return null;
+    if (!detail.ok) return null;
 
     type ReviewDetail = {
       reviews: Array<{ author: { login: string }; state: string }>;
     };
 
-    const reviewData: ReviewDetail = JSON.parse(
-      new TextDecoder().decode(detail.stdout),
-    );
+    const reviewData: ReviewDetail = JSON.parse(detail.data);
 
-    const approvals = reviewData.reviews.filter((r) => r.state === "APPROVED");
+    const approvals = reviewData.reviews.filter(
+      (r) => r.state === "APPROVED" && !isBotLogin(r.author.login),
+    );
     const userApproved = approvals.some(
       (r) => r.author.login.toLowerCase() === user.toLowerCase(),
     );
